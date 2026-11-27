@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #1e1f22; }
+  body { width: 550px; zoom: 2; overflow: hidden; }
+  .card {
+    width: 550px;
+    padding: 16px 16px 12px;
+    color: #dbdee1;
+    font-family: "Noto Sans", "DejaVu Sans", Helvetica, Arial, sans-serif;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 28px;
+    margin-bottom: 12px;
+  }
+  .title {
+    font-size: 19px;
+    line-height: 28px;
+    font-weight: 600;
+    color: #f2f3f5;
+    letter-spacing: .01em;
+  }
+  .marks {
+    position: absolute;
+    left: 6px;
+    bottom: 3px;
+    font-size: 10px;
+    line-height: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: #8b96ff;
+  }
+  .week, .grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 5px;
+  }
+  .week {
+    font-size: 9.5px;
+    line-height: 13px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: #7d838f;
+    text-align: center;
+    padding-bottom: 6px;
+  }
+  .grid { grid-auto-rows: 40px; }
+  .cell {
+    position: relative;
+    background: #24262b;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 5px 6px;
+  }
+  .cell.blank { background: transparent; }
+  .num {
+    font-size: 10.5px;
+    line-height: 1;
+    color: #b9bec7;
+    font-variant-numeric: tabular-nums;
+  }
+  .cell.today { background: #252b4f; border-color: #5865f2; }
+  .cell.today .num { color: #fff; font-weight: 700; }
+  .cell.today .marks { color: #aab3ff; }
+  .foot {
+    margin-top: 12px;
+    padding-top: 9px;
+    border-top: 1px solid #2c2e34;
+    font-size: 11px;
+    line-height: 15px;
+    color: #98a0ab;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .foot b { color: #cfd4dc; font-weight: 600; }
+  .foot .fline {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="head">
+    <span class="title">{{TITLE}}</span>
+  </div>
+  <div class="week">
+    <span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span><span>Su</span>
+  </div>
+  <div class="grid">{{CELLS}}</div>
+  <div class="foot">{{FOOT}}</div>
+</div>
+</body>
+</html>

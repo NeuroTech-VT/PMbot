@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>#robotfucker-club</title>
+<style>
+  :root{
+    --bg:#313338; --bg3:#1e1f22; --text:#dbdee1; --muted:#949ba4;
+    --green:#3ba55d; --yellow:#faa61a; --red:#ed4245; --blurple:#5865f2;
+    --embed:#2b2d31; --line:#3f4147;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:40px 20px; background:#111214; color:var(--text);
+    font-family:"gg sans","Noto Sans",Helvetica,Arial,sans-serif;
+    font-size:16px; line-height:1.375;
+  }
+  .app{max-width:760px;margin:0 auto;background:var(--bg);border-radius:10px;overflow:hidden;
+       box-shadow:0 10px 30px rgba(0,0,0,.45)}
+
+  .bar{background:var(--bg3);padding:9px 14px;font-size:14px}
+  .bar .top{display:flex;align-items:center;gap:8px;color:var(--muted)}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--blurple)}
+  .bar .chan{color:#f2f3f5;font-weight:600}
+  .topic{display:flex;align-items:center;gap:8px;margin-top:5px;font-size:12.5px;color:#b9bdc4}
+  .topic .live{color:#fff;font-weight:600}
+  .topic .late{color:#ff9a9c;font-weight:600}
+
+  .chat{padding:18px 0 26px}
+  .msg{display:flex;gap:14px;padding:6px 18px}
+  .av{width:40px;height:40px;border-radius:50%;flex:0 0 40px;display:flex;align-items:center;justify-content:center;
+      font-weight:700;font-size:15px;color:#fff}
+  .a1{background:var(--blurple)}.a2{background:#eb459e}
+  .body{min-width:0;flex:1}
+  .who{font-size:15px;margin-bottom:2px}
+  .who .name{color:#fff;font-weight:600}
+  .bot{background:var(--blurple);color:#fff;font-size:10px;font-weight:700;border-radius:3px;padding:1px 4px;
+       vertical-align:middle;margin-left:6px;letter-spacing:.02em}
+  .who .time{color:var(--muted);font-size:12px;margin-left:6px}
+  .txt{margin:0}
+  .cmd{background:#3f4147;border-radius:3px;padding:1px 6px;font-family:ui-monospace,monospace;
+       font-size:14px;color:#fff}
+
+  .todo{border-left:4px solid var(--yellow);background:var(--embed);border-radius:4px;
+        padding:14px 16px 12px;margin:6px 0 6px}
+  .todo .h{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .todo .title{color:#fff;font-weight:700;font-size:16px}
+  .todo .counts{color:var(--muted);font-size:13px}
+  .todo .counts i{font-style:normal;color:var(--red)}
+  .todo .rule{height:1px;background:var(--line);margin:10px 0}
+  .group{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8b9099;margin:10px 0 4px}
+
+  .row{display:flex;align-items:baseline;gap:8px;font-size:14px;padding:3px 0}
+  .ico{width:14px;flex:0 0 14px;font-size:12px;line-height:1}
+  .task{flex:1;min-width:0}
+  .owner{color:#fff;font-weight:600}
+  .date{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .late .date{color:var(--red);font-weight:600}
+  .tag{font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+       border-radius:3px;padding:1px 5px;white-space:nowrap}
+  .t-late{background:rgba(237,66,69,.16);color:#ff9a9c}
+  .t-block{background:rgba(250,166,26,.16);color:#ffc46b}
+  .t-on{background:rgba(88,101,242,.22);color:#aab4ff}
+  .foot{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:12px;color:var(--muted)}
+  .foot code{background:#3f4147;border-radius:3px;padding:1px 5px;color:#dbdee1;
+             font-family:ui-monospace,monospace;font-size:12px}
+
+  .q{margin:6px 0 8px}
+  .q .qtitle{font-weight:700;color:#fff;margin-bottom:3px}
+  .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .btn{display:inline-flex;align-items:center;gap:6px;border-radius:3px;padding:7px 13px;
+       font-size:14px;font-weight:600;color:#fff;border:none}
+  .b-sec{background:#4e5058}.b-pri{background:var(--blurple)}
+  .b-suc{background:var(--green)}.b-dan{background:var(--red)}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="bar">
+    <div class="top"><span class="dot"></span><span class="chan">#robotfucker-club</span></div>
+    <div class="topic">
+      <span class="live">SimpleSexbotMK1</span> · club demo Fri 5 Dec · 5 open · <span class="late">1 late</span> · <code style="font-size:11.5px">!todo</code>
+    </div>
+  </div>
+
+  <div class="chat">
+    <div class="msg">
+      <div class="av a2">S</div>
+      <div class="body">
+        <div class="who"><span class="name">sal</span><span class="time">Today at 08:57</span></div>
+        <p class="txt">who's doing the beta testing tomorrow, my ass is still sore</p>
+      </div>
+    </div>
+
+    <div class="msg">
+      <div class="av a2">S</div>
+      <div class="body">
+        <div class="who"><span class="name">sal</span><span class="time">Today at 08:58</span></div>
+        <p class="txt"><span class="cmd">!todo</span></p>
+      </div>
+    </div>
+
+    <div class="msg">
+      <div class="av a1">P</div>
+      <div class="body">
+        <div class="who"><span class="name">pmbot</span><span class="bot">BOT</span><span class="time">Today at 08:58</span></div>
+
+        <div class="todo">
+          <div class="h">
+            <span class="title">SimpleSexbotMK1</span>
+            <span class="counts">5 open · <i>1 late</i> · club demo Fri 5 Dec, 8pm, studio B</span>
+          </div>
+          <div class="rule"></div>
+
+          <div class="group">Late</div>
+          <div class="row late">
+            <span class="ico">●</span>
+            <span class="task">Machine the actuator mount (the bit that does the work)</span>
+            <span class="owner">sal</span>
+            <span class="date">Mon 1 Dec</span>
+            <span class="tag t-late">1 day late</span>
+          </div>
+
+          <div class="group">Open</div>
+          <div class="row">
+            <span class="ico">◐</span>
+            <span class="task">Fit the 150 mm linear actuator into the arm</span>
+            <span class="owner">priya</span>
+            <span class="date">Tue 2 Dec</span>
+            <span class="tag t-on">on it</span>
+          </div>
+          <div class="row">
+            <span class="ico">◑</span>
+            <span class="task">Stroke profile and speed limits in firmware</span>
+            <span class="owner">tom</span>
+            <span class="date">Wed 3 Dec</span>
+          </div>
+          <div class="row">
+            <span class="ico">◔</span>
+            <span class="task">E-stop: has to cut power mid-stroke</span>
+            <span class="owner">owen</span>
+            <span class="date">Thu 4 Dec</span>
+            <span class="tag t-block">blocked</span>
+          </div>
+          <div class="row">
+            <span class="ico">○</span>
+            <span class="task">Load test at full stroke</span>
+            <span class="owner">priya</span>
+            <span class="date">Fri 5 Dec</span>
+          </div>
+          <div class="row">
+            <span class="ico">○</span>
+            <span class="task">Beta test session, studio B</span>
+            <span class="owner">sal</span>
+            <span class="date">Fri 5 Dec</span>
+            <span class="tag t-on">8pm</span>
+          </div>
+
+          <div class="rule"></div>
+          <div class="foot"><code>!todo</code><span>· last edited today at 08:58</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="msg">
+      <div class="av a2">S</div>
+      <div class="body">
+        <div class="who"><span class="name">sal</span><span class="time">Today at 09:01</span></div>
+        <p class="txt">so I'm getting railed again. cool</p>
+      </div>
+    </div>
+
+    <div class="msg">
+      <div class="av a1">P</div>
+      <div class="body">
+        <div class="who"><span class="name">pmbot</span><span class="bot">BOT</span><span class="time">Today at 09:30</span></div>
+        <div class="q">
+          <div class="qtitle">Daily check-in · sal</div>
+          <div style="font-size:14px;color:var(--muted)">Machine the actuator mount <span style="color:#ff9a9c">(1 day late)</span> · Beta test session, studio B (8pm)</div>
+          <div class="btns">
+            <button class="btn b-suc">✓ Done</button>
+            <button class="btn b-pri">◐ On it</button>
+            <button class="btn b-dan">■ Blocked</button>
+            <button class="btn b-sec">○ Not started</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="msg">
+      <div class="av a1">P</div>
+      <div class="body">
+        <div class="who"><span class="name">pmbot</span><span class="bot">BOT</span><span class="time">Today at 09:31</span></div>
+        <p class="txt">✓ Machine the actuator mount: done. 4 open, 0 late. <span class="cmd">!todo</span> to see it.</p>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
