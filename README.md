@@ -1,6 +1,12 @@
 # PMbot
 
-A project manager that lives in a Discord server, built for a college design team that already does its work in Discord. It is not a chatbot and not an app: it keeps one todo list per project, asks a daily check-in, sends two reminders per task, and posts an end of week note on Sunday evening.
+Simple project management tools in Discord
+
+## Main features
+
+- Todo list per project --> TO IMPLEMENT
+- Daily check-in & reminders (before deadline and after deadline if late)
+- End of week note every Sunday evening
 
 ## Status
 
