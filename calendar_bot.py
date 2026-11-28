@@ -113,7 +113,7 @@ class CardNavView(discord.ui.View):
             return
         channel_id, entry = found
         if delta == 0:
-            now = datetime.now()
+            now = core.now_local(entry["scope"])
             year, month = now.year, now.month
         else:
             year, month = shift_month(int(entry["year"]), int(entry["month"]), delta)
@@ -187,7 +187,7 @@ class Calendar(commands.Cog):
         year: int | None = None,
         month: int | None = None,
     ) -> discord.Message:
-        now = datetime.now()
+        now = core.now_local(scope)
         year = year or now.year
         month = month or now.month
         file = await self.render_file(scope, year, month)
@@ -250,7 +250,7 @@ class Calendar(commands.Cog):
             await self.remove_command(ctx, scope, text.split(" ", 1)[1].strip())
             return
 
-        hit = core.find_date(text)
+        hit = core.find_date(text, core.today_local(scope))
         if hit:
             leftover = (text[: hit[1][0]] + text[hit[1][1]:]).strip()
             if not leftover:
@@ -267,7 +267,7 @@ class Calendar(commands.Cog):
         )
 
     async def add_command(self, ctx: commands.Context, scope: str, text: str) -> None:
-        parsed = core.parse_add(text)
+        parsed = core.parse_add(text, scope=scope)
         if not parsed:
             await ctx.reply(
                 "Say what and when: `!cal add Lunch fri 12:30 @ Café Nord`",
@@ -337,7 +337,7 @@ class Calendar(commands.Cog):
             try:
                 user = self.bot.get_user(int(user_id)) or await self.bot.fetch_user(int(user_id))
                 await user.send(
-                    self.reminder_text(event),
+                    self.reminder_text(event, scope),
                     view=ReminderView(self, scope, event["id"]),
                 )
                 log.info("reminder sent for %s (%s)", event["title"], event["date"])
@@ -349,12 +349,12 @@ class Calendar(commands.Cog):
         await self.bot.wait_until_ready()
 
     @staticmethod
-    def reminder_text(event: dict) -> str:
+    def reminder_text(event: dict, scope: str | None = None) -> str:
         place = f" · {event['place']}" if event.get("place") else ""
         if not event.get("time"):
             return f"**Today · {event['title']}**\nAll day{place}"
         start = datetime.fromisoformat(f"{event['date']}T{event['time']}")
-        minutes = max(0, round((start - datetime.now()).total_seconds() / 60))
+        minutes = max(0, round((start - core.now_local(scope)).total_seconds() / 60))
         head = f"In {minutes} min" if minutes > 1 else "Now"
         span = event["time"]
         if event.get("duration"):

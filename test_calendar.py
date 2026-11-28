@@ -60,6 +60,43 @@ class DateParsing(unittest.TestCase):
         self.assertEqual(day, date(2026, 12, 4))
 
 
+class Timezones(unittest.TestCase):
+    def test_guild_scope_reads_the_pmbot_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = core.BASE_DIR
+            core.BASE_DIR = Path(tmp)
+            try:
+                (Path(tmp) / "data" / "servers").mkdir(parents=True)
+                (Path(tmp) / "data" / "servers" / "5.json").write_text(
+                    '{"meta": {"tz": "Pacific/Auckland"}}')
+                self.assertEqual(core.zone_for("guild_5").key, "Pacific/Auckland")
+            finally:
+                core.BASE_DIR = saved
+
+    def test_missing_store_falls_back_to_utc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = core.BASE_DIR
+            core.BASE_DIR = Path(tmp)
+            try:
+                self.assertEqual(core.zone_for("guild_999999").key, "UTC")
+            finally:
+                core.BASE_DIR = saved
+
+    def test_today_comes_from_the_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = core.BASE_DIR
+            core.BASE_DIR = Path(tmp)
+            try:
+                (Path(tmp) / "data" / "servers").mkdir(parents=True)
+                (Path(tmp) / "data" / "servers" / "5.json").write_text(
+                    '{"meta": {"tz": "Pacific/Kiritimati"}}')
+                self.assertEqual(core.today_local("guild_5"), core.now_local("guild_5").date())
+                self.assertNotEqual(core.zone_for("guild_5").utcoffset(None),
+                                    core.zone_for(None).utcoffset(None))
+            finally:
+                core.BASE_DIR = saved
+
+
 class TimeParsing(unittest.TestCase):
     def test_clock(self):
         self.assertEqual(core.find_time("Lunch 12:30")[0], "12:30")

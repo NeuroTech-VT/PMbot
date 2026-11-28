@@ -28,12 +28,14 @@ logging.basicConfig(
 log = logging.getLogger("pmbot")
 
 HELP = """**PMbot** · one list per project, one check-in a day, two reminders a task.
+Owners move their own rows; an admin can move any.
 
 **Projects**
 • `!todo [project]` the list, late first, four taps per row
-• `!add <task> @who <date>` one task, one owner, one date · `!add Print the jig @sam fri`
-• `!newproject <name> [#channel]` start a project (admin)
-• `!settings [checkin|note|tz|staff]` times, timezone, who may start projects (admin)
+• `!add [project:] <task> @who <date>` one task, one owner, one date · `!add Print the jig @sam fri`
+• `!tasks [project]` the ids · `!edit 7 new words @sam fri` fix one · `!del 7` remove it
+• `!newproject <name>` start a project (admin) · `!delproject <name>` delete one (admin)
+• `!settings [channel|checkin|note|tz|staff]` where it talks, times, timezone (admin)
 
 **Calendar**
 • `!cal` the month card, with ◀ Today ▶

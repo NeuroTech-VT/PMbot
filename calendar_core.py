@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import re
+import os
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "calendar"
@@ -43,8 +45,8 @@ def _path(scope: str) -> Path:
     return DATA_DIR / f"{safe}.json"
 
 
-def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+def _now_iso(scope: str | None = None) -> str:
+    return now_local(scope).isoformat(timespec="seconds")
 
 
 def _load(scope: str) -> dict[str, Any]:
@@ -91,12 +93,30 @@ def task_emoji(state: str | None) -> str:
     return TASK_STATES.get(state or "open", TASK_STATES["open"])[0]
 
 
-def task_state_label(state: str | None) -> str:
-    return TASK_STATES.get(state or "open", TASK_STATES["open"])[1]
+def _server_tz(guild_id: str) -> str:
+    """A guild's timezone lives in the PMbot store, next to its tasks."""
+    path = BASE_DIR / "data" / "servers" / f"{guild_id}.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))["meta"]["tz"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return os.getenv("PMBOT_TZ") or "UTC"
 
 
-def today_local() -> date:
-    return datetime.now().date()
+def zone_for(scope: str | None) -> ZoneInfo:
+    name = _server_tz(scope.split("_", 1)[1]) if (scope or "").startswith("guild_") else (os.getenv("PMBOT_TZ") or "UTC")
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001  (bad hand edit, unknown tz)
+        return ZoneInfo("UTC")
+
+
+def now_local(scope: str | None = None) -> datetime:
+    """Naive datetime in the scope's own timezone, so it compares with stored times."""
+    return datetime.now(zone_for(scope)).replace(tzinfo=None)
+
+
+def today_local(scope: str | None = None) -> date:
+    return now_local(scope).date()
 
 
 def iso_date(day: date) -> str:
@@ -273,8 +293,8 @@ def add(
         "done": False,
         "created_by": created_by,
         "channel_id": channel_id,
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
+        "created_at": _now_iso(scope),
+        "updated_at": _now_iso(scope),
         "reminded": False,
         "snooze_until": None,
     }
@@ -340,7 +360,7 @@ def update(scope: str, event_id: Any, **fields: Any) -> tuple[dict[str, Any], li
             changed.append("done")
 
     if changed:
-        event["updated_at"] = _now_iso()
+        event["updated_at"] = _now_iso(scope)
         if {"date", "time", "title", "place"} & set(changed):
             event["reminded"] = False
             event["snooze_until"] = None
@@ -361,7 +381,7 @@ def restore(scope: str, event: dict[str, Any]) -> dict[str, Any]:
     if any(item["id"] == event["id"] for item in data["events"]):
         event = dict(event, id=int(data.get("next_id", 1)))
         data["next_id"] = int(data["next_id"]) + 1
-    event = dict(event, reminded=False, snooze_until=None, updated_at=_now_iso())
+    event = dict(event, reminded=False, snooze_until=None, updated_at=_now_iso(scope))
     data["events"].append(event)
     _save(scope, data)
     return event
@@ -370,7 +390,7 @@ def restore(scope: str, event: dict[str, Any]) -> dict[str, Any]:
 def snooze(scope: str, event_id: Any, minutes: int = 10) -> None:
     data = _load(scope)
     event = _find(data, event_id)
-    event["snooze_until"] = (datetime.now() + timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    event["snooze_until"] = (now_local(scope) + timedelta(minutes=minutes)).isoformat(timespec="seconds")
     event["reminded"] = False
     _save(scope, data)
 
@@ -394,7 +414,7 @@ def day_events(scope: str, day: date, include_done: bool = True) -> list[dict[st
 
 
 def upcoming(scope: str, days: int = 120, limit: int = 120) -> list[dict[str, Any]]:
-    today = today_local()
+    today = today_local(scope)
     end = today + timedelta(days=days)
     found = [
         event for event in events(scope)
@@ -403,15 +423,6 @@ def upcoming(scope: str, days: int = 120, limit: int = 120) -> list[dict[str, An
     found.sort(key=lambda ev: (ev["date"], ev["time"] or "", ev["title"]))
     return found[:limit]
 
-
-def overdue(scope: str) -> list[dict[str, Any]]:
-    today = today_local()
-    found = [
-        event for event in events(scope)
-        if not event["done"] and date.fromisoformat(event["date"]) < today
-    ]
-    found.sort(key=lambda ev: (ev["date"], ev["time"] or ""))
-    return found
 
 
 # ------------------------------------------------------------------ reminders
@@ -440,9 +451,9 @@ def event_start(event: dict[str, Any]) -> datetime:
 
 def due_reminders(now: datetime | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Events whose reminder time has arrived, skipping ones the bot slept through."""
-    now = now or datetime.now()
     due: list[tuple[str, dict[str, Any]]] = []
     for scope in scopes():
+        now = now or now_local(scope)
         data = _load(scope)
         dirty = False
         for event in data["events"]:
@@ -535,9 +546,9 @@ def remove_receipt(event: dict[str, Any]) -> str:
 _PLACE = re.compile(r"(?:^|\s)@\s*(.+?)\s*$")
 
 
-def parse_add(text: str, today: date | None = None) -> dict[str, Any] | None:
+def parse_add(text: str, today: date | None = None, scope: str | None = None) -> dict[str, Any] | None:
     """`Lunch fri 12:30 @ Café Nord` -> event fields, or None when there is no date."""
-    today = today or today_local()
+    today = today or today_local(scope)
     spans: list[tuple[int, int]] = []
 
     date_hit = find_date(text, today)
@@ -568,7 +579,7 @@ def parse_add(text: str, today: date | None = None) -> dict[str, Any] | None:
 
 def find_remove(scope: str, text: str, today: date | None = None) -> list[dict[str, Any]]:
     """Match events by day and/or words: `fri lunch`, `dentist`, `3 dec`."""
-    today = today or today_local()
+    today = today or today_local(scope)
     when = None
     query = text.strip()
     date_hit = find_date(text, today)
@@ -593,7 +604,7 @@ def day_text(scope: str, day: date, tasks: list[dict] | None = None) -> str:
     due = [task for task in (tasks or []) if task.get("date") == day.isoformat()]
     due.sort(key=lambda task: (task.get("title") or "").lower())
     label = f"**{WDAYS[day.weekday()]} {day.day} {MONTHS[day.month - 1]}**"
-    if day.year != today_local().year:
+    if day.year != today_local(scope).year:
         label += f" {day.year}"
     if not found and not due:
         return f"{label}\nNothing scheduled.\n`!cal add <what> {WDAYS[day.weekday()].lower()} 14:00`"

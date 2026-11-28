@@ -8,11 +8,11 @@ daily check-in, sends two reminders per task, and posts an end of week note on S
 
 Implemented in this repo as one bot process. `bot.py` loads two cogs:
 
-- `pmbot.py`: one list per project, `!todo`, `!add`, `!newproject`, `!settings`, the four buttons, the
-  daily check-in, two reminders per task and the Sunday note. JSON store in `data/servers/`, nightly
-  backup in `data/backups/`.
-- `calendar_bot.py` + `calendar_core.py` + `calendar_card.py/html`: the month card, typed `!cal`
-  commands, one day as text and event reminders in a DM. No hour-by-hour view and no free text:
+- `pmbot.py`: one list per project, `!todo`, `!add`, `!tasks`, `!edit`, `!del`, `!newproject`,
+  `!delproject`, `!settings`, the four buttons, the daily check-in, two reminders per task and the
+  Sunday note. JSON store in `data/servers/`, nightly backup in `data/backups/`.
+- `calendar_bot.py` + `calendar_core.py` + `calendar_card.py/html`: the month card, typed
+  `!cal` commands, one day as text and event reminders in a DM. No hour-by-hour view and no free text:
   calendar changes are typed.
 - `test_pmbot.py`, `test_calendar.py`: the pure parts.
 
@@ -53,35 +53,51 @@ Tests:
 .venv/bin/python -m unittest test_pmbot test_calendar -v
 ```
 
-## Docs
+## How it is put together
 
-- `plan.md` / `plan.pdf`: what it is and why, then the feature set.
-- `implementation.md` / `implementation.pdf`: how it gets built (stack, JSON shape, scheduling,
-  storage safety, the calendar, order of work).
-- `prototypes/`: HTML mocks of the two things people actually see, the todo list and the end of week
-  note. Open them in a browser, each is one Discord screen. `prototypes/sanitized/` holds the same two
-  screens with a neutral demo project (building a phone) instead of the real one, for showing to anyone.
+One process, no services. `data/servers/<guild_id>.json` per server, four keys: `meta`
+(timezone, home channel, check-in and note times, who may start projects), `projects`,
+`tasks`, `runs` (last check-in per person, last note, last backup). Tasks are a flat list —
+a task carries a `project` id, so it never nests and moving one is a field change. Dates
+are `YYYY-MM-DD` in the server's timezone; button ids read `task:7:done`, so they survive a
+restart with no lookup table.
+
+A project is a server-wide thing, not a channel. `!newproject Halo` only takes a name; the
+list is summoned with `!todo Halo` in whatever channel you are in, and each project keeps one
+live list per channel in `lists: {channel_id: message_id}`. Check-ins, reminders and the note
+all go to `meta.channel` — the channel the first project was created in until you move it
+with `!settings channel #pm`. Calendar events live in `data/guild_<guild_id>.json`.
+
+Scheduling is one `discord.ext.tasks` loop every 30 seconds asking four questions — is a
+check-in due, is a task reminder due, is a calendar reminder due, is the note due — all
+answered from the same task and event data. Every send stamps what it did, so a missed slot
+fires once after boot instead of twice. Reminders are thresholds, not windows: "due tomorrow"
+means "due within a day and not reminded yet", so a bot that was off for a day still sends it.
+
+Writes go through a temporary file, fsync and `os.replace`, with the previous version kept
+as `.json.bak`, under one lock per server; a nightly copy of `data/servers/` lands in
+`data/backups/` and the newest 14 are kept. A corrupt file falls back to its `.bak`, and
+with the bot stopped the JSON can be edited by hand.
 
 ## Decisions worth remembering
 
-- **The todo list is the product.** One message per project, summoned with `!todo`, edited in place
-  forever. Nothing is pinned.
-- **Four taps, never a typed status.** Done, On it, Blocked, Not started.
+- **The todo list is the product.** One message per project per channel, summoned with `!todo` and
+  edited in place forever — asking twice refines the same message. Nothing is pinned. Rows past the
+  fifth have no buttons (Discord allows five action rows), so the message says so and `!tasks` carries
+  the ids the check-in cannot reach.
+- **Four taps, never a typed status.** Done, On it, Blocked, Not started. Owners move their own
+  rows; an admin can move anyone's, and a row whose owner is a bare name is open to the channel.
+- **Corrections are typed, one task at a time.** `!tasks` prints every open task with its id,
+  `!edit 7 <words> @who <date>` changes only what you give it, `!del 7` removes it.
 - **Two reminders, ever**: one before the deadline, one when it first slips. After that a task waits
   for the note.
 - **No AI.** Tasks and calendar changes are typed; there is no model call anywhere.
 - **College team, not a company.** Weeks run Sunday to Saturday, weekend work counts, and nothing
   measures hours.
 - **JSON on disk**, one file per server, hand editable while the bot is stopped.
+- **A project has no channel.** It is a name and a set of tasks, server-wide. The list shows up
+  wherever you ask for it and is kept up to date in each channel separately.
+- **Deleting is a button, not a typed word.** `!delproject <name>` prints the project, its counts and
+  how many list messages it will remove, then waits for a press; only the admin who ran it can
+  confirm, and its tasks go with it.
 
-## Regenerating the docs
-
-Both documents are generated, so edit the Python and re-render rather than editing the PDF:
-
-```
-.venv-pdf/bin/python build_plan.py
-.venv-pdf/bin/python build_impl.py
-```
-
-`build_plan.py` writes `plan.md` and `plan.pdf`; `build_impl.py` writes `implementation.md` and
-`implementation.pdf`.

@@ -1,0 +1,17 @@
+[Unit]
+Description=PMbot (Discord project manager)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmbot
+Group=pmbot
+WorkingDirectory=/opt/pmbot
+ExecStart=/opt/pmbot/.venv/bin/python /opt/pmbot/bot.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -53,7 +53,7 @@ def build(scope: str, year: int, month: int, tasks: list[dict] | None = None) ->
     events = core.month_events(scope, year, month)
     prefix = f"{year:04d}-{month:02d}-"
     tasks = [task for task in (tasks or []) if str(task.get("date") or "").startswith(prefix)]
-    today = core.today_local()
+    today = core.today_local(scope)
     by_day: dict[str, list[dict]] = {}
     for event in events:
         by_day.setdefault(event["date"], []).append(event)

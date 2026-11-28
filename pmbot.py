@@ -1,9 +1,8 @@
 """PMbot: a project manager that lives in the Discord server.
 
-Implements `implementation.md` as a cog loaded by `bot.py`.  One JSON file per
-server in `data/servers/`, one todo message per project edited in place, four
-state buttons, one daily check-in, two reminders per task ever, and an end of
-week note on Sunday evening.
+The todo cog, loaded by `bot.py`.  One JSON file per server in `data/servers/`,
+one todo message per project edited in place, four state buttons, one daily
+check-in, two reminders per task ever, and an end of week note on Sunday evening.
 
 Commands: `!todo`, `!add`, `!newproject`, `!settings`.
 Deliberately not here: no model, no boards, no dashboards, no per-task threads.
@@ -30,6 +29,7 @@ BACKUP_DIR = BASE_DIR / "data" / "backups"
 MAX_ROWS = 25          # tasks rendered per list message
 MAX_BUTTON_ROWS = 5    # four buttons per row => five tasks per message
 KEEP_BACKUPS = 14
+MAX_LISTS = 25         # channels a project keeps a live list in
 TICK_SECONDS = 30
 AUTODELETE = 90        # seconds before hints and confirmations tidy themselves
 
@@ -82,7 +82,14 @@ def zone(name: str):
 
 def new_server(tz: str) -> dict:
     return {
-        "meta": {"tz": tz, "checkin": "09:30", "note": "sun 18:00", "staff_can_create": False},
+        "meta": {
+            "tz": tz,
+            "checkin": "09:30",
+            "note": "sun 18:00",
+            "staff_can_create": False,
+            "channel": None,
+        },
+        "version": 1,
         "projects": [],
         "tasks": [],
         "runs": {"checkin": {}, "note": None, "backup": None},
@@ -110,17 +117,32 @@ def server(guild_id: int) -> dict:
     if not isinstance(data, dict) or "meta" not in data:
         data = new_server(default_tz())
 
+    data.setdefault("version", 1)
     meta = data.setdefault("meta", {})
     meta.setdefault("tz", default_tz())
     meta.setdefault("checkin", "09:30")
     meta.setdefault("note", "sun 18:00")
     meta.setdefault("staff_can_create", False)
+    meta.setdefault("channel", None)
     data.setdefault("projects", [])
     data.setdefault("tasks", [])
     runs = data.setdefault("runs", {})
     runs.setdefault("checkin", {})
     runs.setdefault("note", None)
     runs.setdefault("backup", None)
+
+    # Projects used to be tied to a channel. A project is a server-wide thing now:
+    # `lists` maps a channel to the list message posted there, `meta.channel` is
+    # where check-ins, reminders and the note go.
+    for project in data["projects"]:
+        lists = project.setdefault("lists", {})
+        old_channel = project.pop("channel_id", None)
+        old_message = project.pop("todo_message_id", None)
+        if old_channel and old_message:
+            lists.setdefault(str(old_channel), str(old_message))
+        if old_channel and not meta.get("channel"):
+            meta["channel"] = str(old_channel)
+
     _servers[guild_id] = data
     return data
 
@@ -143,6 +165,11 @@ def save(guild_id: int) -> None:
     os.replace(tmp, path)
 
 
+async def asave(guild_id: int) -> None:
+    """Write off the event loop: fsync is a few milliseconds of dead Discord time."""
+    await asyncio.to_thread(save, guild_id)
+
+
 def backup_all(today: date) -> Path | None:
     """Copy every server file into data/backups/<date>/, keep the newest 14."""
     if not DATA_DIR.exists():
@@ -158,10 +185,16 @@ def backup_all(today: date) -> Path | None:
 
 
 # ----------------------------------------------------------------------- model
-def project_by_channel(data: dict, channel_id: int) -> dict | None:
-    for project in data["projects"]:
-        if str(project.get("channel_id")) == str(channel_id):
-            return project
+def home_channel(guild: discord.Guild, data: dict) -> discord.abc.GuildChannel | None:
+    """Where PMbot speaks: `!settings channel`, else any channel it can write in."""
+    wanted = data["meta"].get("channel")
+    if wanted:
+        channel = guild.get_channel(int(wanted)) if str(wanted).isdigit() else None
+        if channel is not None:
+            return channel
+    for channel in guild.text_channels:
+        if channel.permissions_for(guild.me).send_messages:
+            return channel
     return None
 
 
@@ -183,12 +216,41 @@ def project_by_ref(data: dict, ref: str | None) -> dict | None:
     return None
 
 
+def take_project_ref(data: dict, line: str) -> tuple[dict | None, str | None, str]:
+    """`Halo: print the jig @sam fri` -> (Halo, "Halo", "print the jig @sam fri").
+
+    The colon is what makes it safe: task text that merely starts with a project's
+    name is left alone.
+    """
+    head, colon, tail = line.partition(":")
+    if colon:
+        project = project_by_ref(data, head)
+        if project is not None and tail.strip():
+            return project, head.strip(), tail.strip()
+    return None, None, line
+
+
 def tasks_of(data: dict, project_id: int) -> list[dict]:
     return [t for t in data["tasks"] if t.get("project") == project_id]
 
 
 def next_id(items: list[dict]) -> int:
     return max((i["id"] for i in items), default=0) + 1
+
+
+def remove_project(data: dict, project_id: int) -> tuple[dict | None, int]:
+    """Drop a project and the tasks that belong to it. Returns (project, tasks removed).
+
+    Tasks carry the project id, so nothing is left dangling; calendar events are
+    not tied to projects and are untouched.
+    """
+    project = next((p for p in data["projects"] if p["id"] == project_id), None)
+    if project is None:
+        return None, 0
+    doomed = [t for t in data["tasks"] if t.get("project") == project_id]
+    data["tasks"] = [t for t in data["tasks"] if t.get("project") != project_id]
+    data["projects"] = [p for p in data["projects"] if p["id"] != project_id]
+    return project, len(doomed)
 
 
 def counts(tasks: list[dict], today: date) -> tuple[int, int, int]:
@@ -245,10 +307,11 @@ def owner_tag(task: dict) -> str:
 
 # ----------------------------------------------------------------------- dates
 _ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
-_DMY = re.compile(r"\b(\d{1,2})[./](\d{1,2})\b")
 _DAY_MONTH = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", re.I)
 _MONTH_DAY = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?\b", re.I)
-_REL = re.compile(r"\b(?:\+|in\s+)?(\d{1,2})\s*([dw])\b", re.I)
+# The "+"/"in" is not optional: a bare "3d" or "3D" is a measurement or a printer,
+# not a date. Same for slash dates — "1/2 plywood" is a thickness.
+_REL = re.compile(r"(?:\+|\bin\s+)(\d{1,2})\s*(d(?:ays?)?|w(?:eeks?|ks)?)\b", re.I)
 _WEEKDAY = re.compile(r"\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:day|sday|nesday|rsday|urday)?\b", re.I)
 _WORD = re.compile(r"\b(today|tomorrow)\b", re.I)
 
@@ -256,8 +319,9 @@ _WORD = re.compile(r"\b(today|tomorrow)\b", re.I)
 def parse_when(text: str, today: date) -> tuple[date, str] | None:
     """Find one date in `text`. Returns (date, matched substring) or None.
 
-    Understands 2026-12-05, 5/12, 5 Dec, Dec 5, +3d, in 2w, mon..sun,
-    today and tomorrow.
+    Understands 2026-12-05, 5 Dec, Dec 5, +3d, in 2 weeks, mon..sun, today and
+    tomorrow. Deliberately does not understand bare `d/m`: "cut 1/2 plywood" and
+    "8.5 mm" would otherwise become deadlines and lose the number from the title.
     """
     match = _ISO.search(text)
     if match:
@@ -280,26 +344,11 @@ def parse_when(text: str, today: date) -> tuple[date, str] | None:
                 candidate = date(year + 1, month, int(day))
             return candidate, match.group(0)
 
-    match = _DMY.search(text)
-    if match:
-        day, month = int(match[1]), int(match[2])
-        try:
-            candidate = date(today.year, month, day)
-        except ValueError:
-            candidate = None
-        if candidate:
-            if candidate < today - timedelta(days=180):
-                try:
-                    candidate = date(today.year + 1, month, day)
-                except ValueError:
-                    candidate = None
-            if candidate:
-                return candidate, match.group(0)
-
     match = _REL.search(text)
     if match:
-        amount, unit = int(match[1]), match[2].lower()
-        return today + timedelta(days=amount if unit == "d" else amount * 7), match.group(0)
+        amount = int(match[1])
+        days = amount if match[2].lower().startswith("d") else amount * 7
+        return today + timedelta(days=days), match.group(0)
 
     match = _WEEKDAY.search(text)
     if match:
@@ -451,27 +500,39 @@ def render_list(project: dict, tasks: list[dict], today: date) -> str:
         lines.append(f"✅ {done} finished, kept out of the way.")
         lines.append("")
 
-    lines.append("`!add <task> @who <date>` · `!todo`")
+    if shown > MAX_BUTTON_ROWS:
+        lines.append(f"Only the first {MAX_BUTTON_ROWS} rows carry buttons; the check-in taps each person's own.")
+        lines.append("")
+    lines.append("`!add <task> @who <date>` · `!tasks` ids · `!todo`")
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
-def render_checkin(display_name: str, tasks: list[dict], today: date) -> str:
+def render_checkin(display_name: str, entries: list[tuple[str, dict]], today: date) -> str:
+    """One person's open work, grouped by project. entries = [(project, task)]."""
+    names = {name for name, _ in entries}
     lines = [f"**Daily check-in · {display_name}**", ""]
     shown = 0
-    for task in tasks[:MAX_ROWS]:
+    last_project = None
+    for project, task in entries[:MAX_ROWS]:
         block = task_line(task, today)
         if not fits(lines, block, 1900):
             break
+        if len(names) > 1 and project != last_project:
+            lines.append(f"**{project}**")
+            last_project = project
         lines.append(block)
         shown += 1
-    if len(tasks) > shown:
-        lines.append(f"+{len(tasks) - shown} more in `!todo`")
+    if len(entries) > shown:
+        lines.append(f"+{len(entries) - shown} more in `!todo`")
+    if len(entries) > MAX_BUTTON_ROWS:
+        lines.append(f"Buttons cover the first {MAX_BUTTON_ROWS}; `!tasks` lists the rest with ids.")
     lines.append("")
     lines.append("Tap a state for each row, or ignore this if nothing moved.")
     return "\n".join(lines)
 
 
-def render_note(project: dict, tasks: list[dict], today: date) -> str:
+def note_sections(project: dict, tasks: list[dict], today: date) -> list[str]:
+    """One project's part of the end of week note."""
     finished = finished_since(tasks, today)
     slipped = [t for t in tasks if is_late(t, today)]
     risky = [t for t in tasks if at_risk(t, today)]
@@ -483,15 +544,7 @@ def render_note(project: dict, tasks: list[dict], today: date) -> str:
         key=lambda t: t["due"],
     )
 
-    summary = [f"**{len(finished)} finished**"]
-    summary.append(f"**{len(slipped)} slipped**")
-    summary.append(f"**{len(risky)} at risk**")
-
-    lines = [
-        f"**End of week note · {fmt_week_span(today)} · {project['name']}**",
-        " · ".join(summary),
-        "",
-    ]
+    lines = [f"**{project['name']}**", ""]
 
     lines.append("**Finished**")
     if finished:
@@ -535,9 +588,25 @@ def render_note(project: dict, tasks: list[dict], today: date) -> str:
     else:
         lines.append("· nothing due, put next week in `!add`")
 
-    lines.append("")
-    lines.append("`!todo` for the full list.")
-    return "\n".join(lines)
+    return lines
+
+
+def render_note(entries: list[tuple[dict, list[dict]]], today: date) -> str:
+    """One note for the whole server, a section per project. entries = [(project, tasks)]."""
+    finished = sum(len(finished_since(group, today)) for _, group in entries)
+    slipped = sum(1 for _, group in entries for t in group if is_late(t, today))
+    risky = sum(1 for _, group in entries for t in group if at_risk(t, today))
+    head = [
+        f"**End of week note · {fmt_week_span(today)}**",
+        " · ".join([f"**{finished} finished**", f"**{slipped} slipped**", f"**{risky} at risk**"]),
+        "",
+    ]
+    body: list[str] = []
+    for project, group in entries:
+        body.extend(note_sections(project, group, today))
+        body.append("")
+    body.append("`!todo <project>` for a full list.")
+    return "\n".join(head + body)
 
 
 def task_view(guild_id: int, tasks: list[dict]) -> discord.ui.View | None:
@@ -556,6 +625,79 @@ def task_view(guild_id: int, tasks: list[dict]) -> discord.ui.View | None:
                 )
             )
     return view
+
+
+class DeleteProjectView(discord.ui.View):
+    """The delete confirmation. Only the admin who asked can press it."""
+
+    def __init__(self, cog: "PMBot", guild_id: int, project: dict, tasks: int, author_id: int):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.project = project
+        self.tasks = tasks
+        self.author_id = author_id
+
+    async def _mine(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only whoever ran `!delproject` can confirm it.", ephemeral=True
+            )
+            return False
+        if not PMBot.is_admin(interaction.user) and not server(self.guild_id)["meta"].get("staff_can_create"):
+            await interaction.response.send_message(
+                "Only an admin can delete a project.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _remove(self) -> str:
+        project_id = self.project["id"]
+        async with lock_for(self.guild_id):
+            data = server(self.guild_id)
+            project, removed = remove_project(data, project_id)
+            if project is None:
+                return "already gone"
+            await asave(self.guild_id)
+
+        for channel_id, message_id in (project.get("lists") or {}).items():
+            try:
+                channel = self.cog.bot.get_channel(int(channel_id))
+                if channel is None:
+                    continue
+                message = await channel.fetch_message(int(message_id))
+                await message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
+                continue
+        return f"{removed} task{'s' if removed != 1 else ''} deleted with it"
+
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._mine(interaction):
+            return
+        # Defer first: deleting the todo message and writing the file can take
+        # longer than Discord's three second window for responding.
+        await interaction.response.defer()
+        name = self.project["name"]
+        try:
+            outcome = await self._remove()
+        except Exception:  # noqa: BLE001  (tell the user instead of hanging)
+            log.exception("deleting project %s failed", name)
+            await interaction.edit_original_response(
+                content=f"Could not delete **{name}**, nothing was changed.", view=None
+            )
+            return
+        self.stop()
+        await interaction.edit_original_response(
+            content=f"**{name}** is gone · {outcome}", view=None
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._mine(interaction):
+            return
+        self.stop()
+        await interaction.response.edit_message(content="Left it alone.", view=None)
 
 
 # ------------------------------------------------------------------------- cog
@@ -590,36 +732,56 @@ class PMBot(commands.Cog):
         perms = member.guild_permissions
         return bool(perms.administrator or perms.manage_guild)
 
-    def resolve_project(
-        self, data: dict, channel: discord.abc.GuildChannel, ref: str | None
-    ) -> dict | None:
-        project = project_by_channel(data, channel.id) or project_by_ref(data, ref)
-        if project is None and len(data["projects"]) == 1:
-            project = data["projects"][0]
-        return project
+    @classmethod
+    def can_tap(cls, member: discord.Member, task: dict) -> bool:
+        """Owner, or an admin. A task owned by a bare name (no id) is fair game."""
+        owner_id = task.get("owner_id")
+        if not owner_id:
+            return True
+        return str(member.id) == str(owner_id) or cls.is_admin(member)
+
+    @staticmethod
+    def resolve_project(data: dict, ref: str | None) -> dict | None:
+        """What the user named, else the only project there is. Channels are not involved."""
+        named = project_by_ref(data, ref)
+        if named is not None:
+            return named
+        if (ref or "").strip():
+            return None  # they named something that is not here; do not guess
+        return data["projects"][0] if len(data["projects"]) == 1 else None
+
+    async def refresh_lists(
+        self, guild_id: int, project: dict, channel: discord.abc.Messageable | None
+    ) -> None:
+        """Refresh the project's list wherever it was already posted."""
+        if channel is None:
+            return
+        message_id = project.get("lists", {}).get(str(getattr(channel, "id", "")))
+        if message_id:
+            await self.render_project(guild_id, project, channel)
 
     async def render_project(
         self, guild_id: int, project: dict, channel: discord.abc.Messageable,
         force_new: bool = False,
     ) -> discord.Message | None:
-        """Post the list as a fresh message (force_new), or refresh the stored one in place."""
+        """Post the list (force_new) or refresh the copy this project has in this channel."""
         data = server(guild_id)
         tasks = tasks_of(data, project["id"])
         today = datetime.now(zone(data["meta"]["tz"])).date()
         text = clip(render_list(project, tasks, today), 1990)
         view = task_view(guild_id, ordered_open(tasks, today))
 
-        stored_channel = str(project.get("channel_id") or "")
-        same_channel = stored_channel == str(getattr(channel, "id", ""))
-        message_id = project.get("todo_message_id")
+        key = str(getattr(channel, "id", ""))
+        lists = project.setdefault("lists", {})
+        message_id = lists.get(key)
 
-        if message_id and same_channel and not force_new:
+        if message_id and not force_new:
             try:
                 message = await channel.fetch_message(int(message_id))
                 await message.edit(content=text, view=view)
                 return message
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
+                lists.pop(key, None)
 
         try:
             message = await channel.send(text, view=view)
@@ -627,10 +789,10 @@ class PMBot(commands.Cog):
             log.warning("could not post todo list: %s", exc)
             return None
 
-        if same_channel or not stored_channel:
-            project["todo_message_id"] = str(message.id)
-            project["channel_id"] = str(channel.id)
-            save(guild_id)
+        lists[key] = str(message.id)
+        while len(lists) > MAX_LISTS:  # oldest channel first
+            lists.pop(next(iter(lists)))
+        await asave(guild_id)
         return message
 
     # -------------------------------------------------------------- commands
@@ -646,25 +808,26 @@ class PMBot(commands.Cog):
                 ctx, "No project here yet. `!newproject <name>` starts one (admin)."
             )
 
+        today = datetime.now(zone(data["meta"]["tz"])).date()
+
         if (ref or "").strip().lower() in {"list", "all", "projects"}:
             lines = ["**Projects**", ""]
             for project in data["projects"]:
-                where = f"<#{project['channel_id']}>" if project.get("channel_id") else "no channel"
-                open_tasks, late, done = counts(tasks_of(data, project["id"]), date.today())
+                open_tasks, late, done = counts(tasks_of(data, project["id"]), today)
                 lines.append(
-                    f"· **{project['name']}** (#{project['id']}) · {where} · "
+                    f"· **{project['name']}** (#{project['id']}) · "
                     f"{open_tasks} open, {late} late, {done} done"
                 )
             return await self.say(ctx, "\n".join(lines), keep=True)
 
-        project = self.resolve_project(data, ctx.channel, ref)
+        project = self.resolve_project(data, ref)
         if project is None:
-            names = ", ".join(f"{p['name']} (#{p['id']})" for p in data["projects"])
-            return await self.say(ctx, f"Which project? {names} · `!todo <name>`")
+            names = "\n".join(f"· **{p['name']}** (#{p['id']})" for p in data["projects"])
+            return await self.say(ctx, f"Which project?\n{names}\n`!todo <name>`", keep=True)
 
-        # `!todo` always answers with a plain new message; later taps and `!add`
-        # refresh that newest list in place so the channel does not fill up.
-        await self.render_project(ctx.guild.id, project, ctx.channel, force_new=True)
+        # One list per project per channel, edited in place: `!todo` is a summon,
+        # not a new message. Only a deleted list gets posted again.
+        await self.render_project(ctx.guild.id, project, ctx.channel)
 
     @commands.command(name="add", aliases=["task"])
     async def add(self, ctx: commands.Context, *, line: str | None = None):
@@ -676,14 +839,22 @@ class PMBot(commands.Cog):
 
         if not line:
             return await self.say(
-                ctx, "One line: `!add <task> @who <date>` · e.g. `!add Print the jig @sam fri`"
+                ctx,
+                "One line: `!add [project:] <task> @who <date>` · e.g. `!add Print the jig @sam fri`",
             )
 
-        project = self.resolve_project(data, ctx.channel, None)
-        if project is None:
-            return await self.say(ctx, "No project in this channel yet. `!newproject <name>`.")
+        if not data["projects"]:
+            return await self.say(ctx, "No project yet. `!newproject <name>` starts one (admin).")
 
-        rest = line
+        # `!add Halo: print the jig @sam fri` picks the project; the colon is what
+        # makes it unambiguous against task text that happens to start with a name.
+        project, ref, rest = take_project_ref(data, line)
+        project = project or self.resolve_project(data, ref)
+        if project is None:
+            names = "\n".join(f"· **{p['name']}** (#{p['id']})" for p in data["projects"])
+            return await self.say(
+                ctx, f"Which project?\n{names}\n`!add <project>: <task> @who <date>`", keep=True
+            )
         found = parse_when(rest, today)
         if not found:
             return await self.say(ctx, "Needs a date: `!add Print the jig @sam fri` (or `2026-12-05`, `+3d`).")
@@ -713,9 +884,9 @@ class PMBot(commands.Cog):
                 "created_by": str(ctx.author.id),
             }
             data["tasks"].append(task)
-            save(ctx.guild.id)
+            await asave(ctx.guild.id)
 
-        await self.render_project(ctx.guild.id, project, ctx.channel)
+        await self.refresh_lists(ctx.guild.id, project, ctx.channel)
         open_tasks, late, _ = counts(tasks_of(data, project["id"]), today)
         await self.say(
             ctx,
@@ -743,9 +914,128 @@ class PMBot(commands.Cog):
                 return member.id, member.display_name, (text[: at.start()] + text[at.end():]).strip()
         return None, at[1], (text[: at.start()] + text[at.end():]).strip()
 
+    @commands.command(name="tasks")
+    async def tasks_list(self, ctx: commands.Context, *, ref: str | None = None):
+        """Every open task with its id: !tasks [project]"""
+        if not ctx.guild:
+            return await self.say(ctx, "PMbot works in a server channel.")
+        data = server(ctx.guild.id)
+        if not data["projects"]:
+            return await self.say(ctx, "No project yet. `!newproject <name>` starts one (admin).")
+
+        project = self.resolve_project(data, ref)
+        if project is None:
+            names = "\n".join(f"· **{p['name']}** (#{p['id']})" for p in data["projects"])
+            return await self.say(ctx, f"Which project?\n{names}\n`!tasks <name>`", keep=True)
+
+        today = datetime.now(zone(data["meta"]["tz"])).date()
+        open_tasks = ordered_open(tasks_of(data, project["id"]), today)
+        done = len(tasks_of(data, project["id"])) - len(open_tasks)
+        if not open_tasks:
+            tail = f" · {done} done" if done else ""
+            return await self.say(ctx, f"**{project['name']}** has nothing open{tail}.", keep=True)
+
+        lines = [f"**{project['name']}** · ids for `!edit` and `!del`", ""]
+        for task in open_tasks[:MAX_ROWS]:
+            bits = [f"`#{task['id']}`", STATE_ICON.get(task["state"], "⬜"), clip(task["text"], 60)]
+            bits.append(f"· {task.get('owner') or 'someone'}")
+            due = iso_to_date(task)
+            if due:
+                bits.append(f"· {fmt_day(due, today)}")
+            lines.append(" ".join(bits))
+        if len(open_tasks) > MAX_ROWS:
+            lines.append(f"+{len(open_tasks) - MAX_ROWS} more")
+        if done:
+            lines.append(f"\n{done} done, not listed.")
+        lines.append("\n`!edit 7 new words @sam fri` · `!del 7`")
+        return await self.say(ctx, "\n".join(lines), keep=True)
+
+    def _task_by_id(self, data: dict, raw: str | None) -> dict | None:
+        digits = re.sub(r"[^0-9]", "", raw or "")
+        if not digits:
+            return None
+        return next((t for t in data["tasks"] if t["id"] == int(digits)), None)
+
+    @commands.command(name="edit")
+    async def edit(self, ctx: commands.Context, *, spec: str | None = None):
+        """Fix a task: !edit 7 new words @sam fri (give only what changed)"""
+        if not ctx.guild:
+            return await self.say(ctx, "PMbot works in a server channel.")
+        data = server(ctx.guild.id)
+        today = datetime.now(zone(data["meta"]["tz"])).date()
+
+        head, _, rest = (spec or "").partition(" ")
+        task = self._task_by_id(data, head)
+        if task is None:
+            ids = ", ".join(f"#{t['id']}" for t in ordered_open(data["tasks"], today)[:10])
+            return await self.say(ctx, f"Which task? `!edit <id> …` · ids: {ids or 'none yet'}")
+        if not rest.strip():
+            return await self.say(
+                ctx, f"`!edit {task['id']} <words>`, `@owner` or a date — give at least one."
+            )
+
+        changed: list[str] = []
+        body = rest.strip()
+        found = parse_when(body, today)
+        if found:
+            due, matched = found
+            task["due"] = due.isoformat()
+            body = (body[: body.index(matched)] + " " + body[body.index(matched) + len(matched):]).strip()
+            changed.append(f"due {fmt_day(due, today)}")
+
+        owner_id, owner_name, body = self._take_owner(ctx, body)
+        if owner_name and owner_id is not None:
+            task["owner"], task["owner_id"] = owner_name, str(owner_id)
+            changed.append(f"owner {owner_name}")
+        elif owner_name:
+            task["owner"], task["owner_id"] = owner_name, None
+            changed.append(f"owner {owner_name}")
+
+        text = re.sub(r"\s{2,}", " ", body).strip(" -–·,")
+        if text:
+            task["text"] = text
+            changed.append("words")
+        if not changed:
+            return await self.say(ctx, "Nothing to change there — words, `@owner` or a date.")
+
+        async with lock_for(ctx.guild.id):
+            await asave(ctx.guild.id)
+
+        project = next((p for p in data["projects"] if p["id"] == task["project"]), None)
+        if project is not None:
+            await self.refresh_lists(ctx.guild.id, project, ctx.channel)
+        await self.say(ctx, f"✅ **#{task['id']} {clip(task['text'], 50)}** · {' · '.join(changed)}.")
+
+    @commands.command(name="del", aliases=["rmtask"])
+    async def del_task(self, ctx: commands.Context, *, spec: str | None = None):
+        """Delete one task: !del 7"""
+        if not ctx.guild:
+            return await self.say(ctx, "PMbot works in a server channel.")
+        data = server(ctx.guild.id)
+        today = datetime.now(zone(data["meta"]["tz"])).date()
+
+        task = self._task_by_id(data, spec)
+        if task is None:
+            ids = ", ".join(f"#{t['id']}" for t in ordered_open(data["tasks"], today)[:10])
+            return await self.say(ctx, f"Which task? `!del <id>` · ids: {ids or 'none yet'}")
+
+        async with lock_for(ctx.guild.id):
+            data["tasks"] = [t for t in data["tasks"] if t["id"] != task["id"]]
+            await asave(ctx.guild.id)
+
+        project = next((p for p in data["projects"] if p["id"] == task["project"]), None)
+        if project is not None:
+            await self.refresh_lists(ctx.guild.id, project, ctx.channel)
+        await self.say(
+            ctx,
+            f"🗑️ **#{task['id']} {clip(task['text'], 60)}** is gone"
+            f" ({task.get('owner') or 'unowned'}, {fmt_day(iso_to_date(task), today) if task.get('due') else 'no date'}).",
+            keep=True,
+        )
+
     @commands.command(name="newproject", aliases=["newp"])
     async def newproject(self, ctx: commands.Context, *, spec: str | None = None):
-        """Start a project: !newproject Project Halo [#channel] (admin)"""
+        """Start a project: !newproject Project Halo (admin)"""
         if not ctx.guild:
             return await self.say(ctx, "PMbot works in a server channel.")
         data = server(ctx.guild.id)
@@ -754,14 +1044,9 @@ class PMBot(commands.Cog):
 
         if not spec:
             return await self.say(
-                ctx, "`!newproject Project Halo` starts one here, then `!add` the first tasks."
+                ctx, "`!newproject Project Halo` starts one, then `!add` the first tasks."
             )
 
-        channel: discord.TextChannel | None = None
-        chan = re.search(r"<#(\d+)>", spec)
-        if chan:
-            channel = ctx.guild.get_channel(int(chan[1]))
-            spec = (spec[: chan.start()] + spec[chan.end():]).strip()
         name = re.sub(r"\s{2,}", " ", spec).strip(" -–·,:")
         if not name:
             return await self.say(ctx, "The project needs a name.")
@@ -771,20 +1056,53 @@ class PMBot(commands.Cog):
         project = {
             "id": next_id(data["projects"]),
             "name": name[:60],
-            "channel_id": str((channel or ctx.channel).id),
-            "todo_message_id": None,
+            "lists": {},
             "created_by": str(ctx.author.id),
         }
         data["projects"].append(project)
-        save(ctx.guild.id)
+        if not data["meta"].get("channel"):
+            data["meta"]["channel"] = str(ctx.channel.id)  # first one claims the home channel
+        await asave(ctx.guild.id)
 
-        target = channel or ctx.channel
-        await self.render_project(ctx.guild.id, project, target)
+        await self.render_project(ctx.guild.id, project, ctx.channel)
         await self.say(
             ctx,
-            f"Project **{project['name']}** (#{project['id']}) in <#{project['channel_id']}>. "
+            f"Project **{project['name']}** (#{project['id']}). `!todo {project['name']}` any time, "
             "`!add <task> @who <date>` for the first few.",
         )
+
+    @commands.command(name="delproject", aliases=["rmproject"])
+    async def delproject(self, ctx: commands.Context, *, ref: str | None = None):
+        """Delete a project and its tasks: !delproject Project Halo (admin)"""
+        if not ctx.guild:
+            return await self.say(ctx, "PMbot works in a server channel.")
+        data = server(ctx.guild.id)
+        if not self.is_admin(ctx.author) and not data["meta"].get("staff_can_create"):
+            return await self.say(ctx, "Only an admin can delete a project.")
+
+        if not data["projects"]:
+            return await self.say(ctx, "There is no project here to delete.")
+
+        # Deliberately no channel fallback: typing a name is the point.
+        project = project_by_ref(data, ref)
+        if project is None:
+            names = "\n".join(f"· **{p['name']}** (#{p['id']})" for p in data["projects"])
+            return await self.say(
+                ctx, f"Which project?\n{names}\n`!delproject <name or #id>`", keep=True
+            )
+
+        tasks = tasks_of(data, project["id"])
+        today = datetime.now(zone(data["meta"]["tz"])).date()
+        open_tasks, late, done = counts(tasks, today)
+        lists = len(project.get("lists") or {})
+        summary = (
+            f"**Delete {project['name']}** (#{project['id']})?\n"
+            f"{open_tasks} open, {late} late, {done} done · "
+            f"{lists} list message{'s' if lists != 1 else ''} to remove\n"
+            "Its tasks go with it. Calendar events are not touched. This cannot be undone."
+        )
+        view = DeleteProjectView(self, ctx.guild.id, project, len(tasks), ctx.author.id)
+        await ctx.reply(summary, view=view, mention_author=False)
 
     @commands.command(name="settings")
     async def settings(self, ctx: commands.Context, key: str | None = None, *, value: str | None = None):
@@ -796,15 +1114,17 @@ class PMBot(commands.Cog):
 
         if key is None:
             note = meta.get("note")
+            home = f"<#{meta['channel']}>" if meta.get("channel") else "the first channel it can post in"
             return await self.say(
                 ctx,
                 f"**PMbot settings**\n"
+                f"· channel `{home}`\n"
                 f"· check-in `{meta.get('checkin') or 'off'}`\n"
                 f"· note `{note or 'off'}`\n"
                 f"· timezone `{meta.get('tz')}`\n"
                 f"· staff can start projects: {'yes' if meta.get('staff_can_create') else 'no'}\n"
-                f"Change one: `!settings checkin 09:30` · `!settings note sun 18:00` · "
-                f"`!settings tz Europe/Lisbon` · `!settings staff on`",
+                f"Change one: `!settings channel #pm` · `!settings checkin 09:30` · "
+                f"`!settings note sun 18:00` · `!settings tz Europe/Lisbon` · `!settings staff on`",
                 keep=True,
             )
 
@@ -814,7 +1134,16 @@ class PMBot(commands.Cog):
         key = key.lower()
         value = (value or "").strip()
 
-        if key == "checkin":
+        if key == "channel":
+            if not value or value.lower() in {"here", "this", "#here"}:
+                meta["channel"] = str(ctx.channel.id)
+            else:
+                found = re.search(r"<#(\d+)>", value)
+                channel = ctx.guild.get_channel(int(found[1])) if found else None
+                if channel is None:
+                    return await self.say(ctx, "Point at a channel: `!settings channel #pm`.")
+                meta["channel"] = str(channel.id)
+        elif key == "checkin":
             if value.lower() in {"off", "none", "no"}:
                 meta["checkin"] = "off"
             elif (when := parse_hhmm(value)):
@@ -822,10 +1151,11 @@ class PMBot(commands.Cog):
             else:
                 return await self.say(ctx, "Time like `09:30`, or `off`.")
         elif key == "note":
+            spec = parse_note(value)
             if value.lower() in {"off", "none", "no"}:
                 meta["note"] = "off"
-            elif parse_note(value):
-                day, when = parse_note(value)
+            elif spec:
+                day, when = spec
                 meta["note"] = f"{WDAYS[day].lower()} {when.hour:02d}:{when.minute:02d}"
             else:
                 return await self.say(ctx, "`sun 18:00`, or `off`.")
@@ -845,10 +1175,11 @@ class PMBot(commands.Cog):
             else:
                 return await self.say(ctx, "`!settings staff on` or `!settings staff off`.")
         else:
-            return await self.say(ctx, "Settings: `checkin`, `note`, `tz`, `staff`.")
+            return await self.say(ctx, "Settings: `channel`, `checkin`, `note`, `tz`, `staff`.")
 
-        save(ctx.guild.id)
+        await asave(ctx.guild.id)
         shown = {
+            "channel": f"<#{meta['channel']}>" if meta.get("channel") else "none",
             "checkin": meta.get("checkin") or "off",
             "note": meta.get("note") or "off",
             "tz": meta.get("tz"),
@@ -885,9 +1216,24 @@ class PMBot(commands.Cog):
         async with lock_for(guild_id):
             task = next((t for t in data["tasks"] if t["id"] == task_id), None)
             if task is None:
+                # A stale message from a deleted project or task. Say so instead of
+                # leaving the tap looking broken.
+                await interaction.followup.send(
+                    "That task is not here any more — `!todo` has the current list.",
+                    ephemeral=True,
+                )
                 return
             project = next((p for p in data["projects"] if p["id"] == task["project"]), None)
             if project is None:
+                await interaction.followup.send(
+                    "That project is gone — `!todo` has the current list.", ephemeral=True
+                )
+                return
+            if not self.can_tap(interaction.user, task):
+                await interaction.followup.send(
+                    f"That one is {owner_tag(task)}'s. Only they or an admin can move it.",
+                    ephemeral=True,
+                )
                 return
 
             task["state"] = state
@@ -897,11 +1243,11 @@ class PMBot(commands.Cog):
             )
             if state == "done":
                 task["reminded_late"] = task["reminded_late"] or today.isoformat()
-            save(guild_id)
+            await asave(guild_id)
 
-        channel = self.bot.get_channel(int(project["channel_id"])) if project.get("channel_id") else None
-        if channel:
-            await self.render_project(guild_id, project, channel)
+        # Refresh the list in whatever channel was tapped in; a project can have a
+        # list in several channels now.
+        await self.refresh_lists(guild_id, project, interaction.channel)
 
         open_tasks, late, _ = counts(tasks_of(data, project["id"]), today)
         verb = STATE_LABEL[state]
@@ -931,7 +1277,7 @@ class PMBot(commands.Cog):
             await self.run_checkins(guild, data, now)
             await self.run_reminders(guild, data, now)
             await self.run_note(guild, data, now)
-            self.run_backup(guild.id, data, now)
+            await self.run_backup(guild.id, data, now)
 
     def _prune_runs(self, data: dict, today: date) -> None:
         cutoff = (today - timedelta(days=3)).isoformat()
@@ -947,68 +1293,72 @@ class PMBot(commands.Cog):
         self._prune_runs(data, today)
         stamp = today.isoformat()
         done_today = data["runs"]["checkin"].setdefault(stamp, [])
+        channel = home_channel(guild, data)
+        if channel is None:
+            return
 
+        # One check-in per person, not per project: their tasks from every project,
+        # in one message, in one channel.
+        people: dict[str, list[tuple[str, dict]]] = {}
         for project in data["projects"]:
-            channel = guild.get_channel(int(project["channel_id"])) if project.get("channel_id") else None
-            if channel is None:
-                continue
-            groups: dict[str, list[dict]] = {}
             for task in ordered_open(tasks_of(data, project["id"]), today):
-                groups.setdefault(owner_key(task), []).append(task)
-            for key, tasks in groups.items():
-                if key in done_today:
-                    continue
-                first = tasks[0]
-                display = first.get("owner") or "someone"
-                head = owner_tag(first) if first.get("owner_id") else f"**{display}**"
-                view = task_view(guild.id, tasks)
-                try:
-                    await channel.send(
-                        f"{head}\n{clip(render_checkin(display, tasks, today), 1900)}",
-                        view=view,
-                        allowed_mentions=discord.AllowedMentions(users=True),
-                    )
-                except discord.HTTPException as exc:
-                    log.warning("check-in failed in %s: %s", channel, exc)
-                    continue
-                done_today.append(key)
-                save(guild.id)
+                people.setdefault(owner_key(task), []).append((project["name"], task))
+
+        for key, entries in people.items():
+            if key in done_today:
+                continue
+            first = entries[0][1]
+            display = first.get("owner") or "someone"
+            head = owner_tag(first) if first.get("owner_id") else f"**{display}**"
+            view = task_view(guild.id, [task for _, task in entries])
+            try:
+                await channel.send(
+                    f"{head}\n{clip(render_checkin(display, entries, today), 1900)}",
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions(users=True),
+                )
+            except discord.HTTPException as exc:
+                log.warning("check-in failed in %s: %s", channel, exc)
+                continue
+            done_today.append(key)
+            await asave(guild.id)
 
     async def run_reminders(self, guild: discord.Guild, data: dict, now: datetime) -> None:
         check_time = parse_hhmm(data["meta"].get("checkin"))
         if check_time and now.time() < check_time:
             return
         today = now.date()
-        tomorrow = today + timedelta(days=1)
+        channel = home_channel(guild, data)
+        if channel is None:
+            return
+        projects = {p["id"]: p["name"] for p in data["projects"]}
 
         for task in data["tasks"]:
-            if task["state"] == "done":
+            if task["state"] == "done" or task["project"] not in projects:
                 continue
             due = iso_to_date(task)
             if due is None:
                 continue
-            project = next((p for p in data["projects"] if p["id"] == task["project"]), None)
-            if project is None or not project.get("channel_id"):
-                continue
-            channel = guild.get_channel(int(project["channel_id"]))
-            if channel is None:
-                continue
+            where = f" ({projects[task['project']]})" if len(projects) > 1 else ""
 
-            if due == tomorrow and not task.get("reminded_due"):
-                task["reminded_due"] = today.isoformat()
-                save(guild.id)
-                await self._remind(
-                    channel,
-                    f"⏰ **{clip(task['text'], 90)}** is due tomorrow · {owner_tag(task)}",
-                )
-            elif due < today and not task.get("reminded_late"):
+            if due < today and not task.get("reminded_late"):
                 task["reminded_late"] = today.isoformat()
-                save(guild.id)
+                await asave(guild.id)
                 late = (today - due).days
                 await self._remind(
                     channel,
-                    f"⚠️ **{clip(task['text'], 90)}** was due {fmt_day(due, today)} · "
+                    f"⚠️ **{clip(task['text'], 90)}**{where} was due {fmt_day(due, today)} · "
                     f"{owner_tag(task)} · {late} day{'s' if late != 1 else ''} late",
+                )
+            elif due <= today + timedelta(days=1) and not task.get("reminded_due"):
+                # Threshold, not "a tick happened to land on the day before": a bot
+                # that was down for a day still sends this once before the deadline.
+                task["reminded_due"] = today.isoformat()
+                await asave(guild.id)
+                when = "today" if due == today else "tomorrow"
+                await self._remind(
+                    channel,
+                    f"⏰ **{clip(task['text'], 90)}**{where} is due {when} · {owner_tag(task)}",
                 )
 
     @staticmethod
@@ -1029,38 +1379,37 @@ class PMBot(commands.Cog):
         if data["runs"].get("note") == today.isoformat():
             return
 
-        posted = False
-        for project in data["projects"]:
-            if not project.get("channel_id"):
-                continue
-            channel = guild.get_channel(int(project["channel_id"]))
-            if channel is None:
-                continue
-            tasks = tasks_of(data, project["id"])
-            if not tasks:
-                continue
-            try:
-                await channel.send(clip(render_note(project, tasks, today), 1990))
-                posted = True
-            except discord.HTTPException as exc:
-                log.warning("note failed in %s: %s", channel, exc)
-
-        if posted or not data["projects"]:
+        channel = home_channel(guild, data)
+        if channel is None:
+            return
+        entries = [
+            (project, tasks_of(data, project["id"]))
+            for project in data["projects"]
+        ]
+        entries = [(name, tasks) for name, tasks in entries if tasks]
+        if not entries:
             data["runs"]["note"] = today.isoformat()
-            save(guild.id)
+            await asave(guild.id)
+            return
 
-    def run_backup(self, guild_id: int, data: dict, now: datetime) -> None:
+        try:
+            await channel.send(clip(render_note(entries, today), 1990))
+        except discord.HTTPException as exc:
+            log.warning("note failed in %s: %s", channel, exc)
+            return
+
+        data["runs"]["note"] = today.isoformat()
+        await asave(guild.id)
+
+    async def run_backup(self, guild_id: int, data: dict, now: datetime) -> None:
+        """One copy of every server file a day, however many servers there are."""
         today = now.date()
-        if now.hour < 3 or data["runs"].get("backup") == today.isoformat():
+        if now.hour < 3 or (BACKUP_DIR / today.isoformat()).exists():
             return
         try:
-            backup_all(today)
+            await asyncio.to_thread(backup_all, today)
         except OSError:
             log.exception("backup failed")
             return
         data["runs"]["backup"] = today.isoformat()
-        save(guild_id)
-
-
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(PMBot(bot))
+        await asave(guild_id)
