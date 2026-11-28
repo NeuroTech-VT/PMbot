@@ -26,26 +26,83 @@ def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     return index // 12, index % 12 + 1
 
 
-def scope_for(ctx_or_message) -> str:
-    guild = getattr(ctx_or_message, "guild", None)
-    author = getattr(ctx_or_message, "author", None)
-    return core.scope_for(guild.id if guild else None, author.id)
+def migrate_cards() -> None:
+    """Cards saved before projects had calendars are keyed by channel id alone."""
+    cards = core.load_cards()
+    changed = False
+    for key in list(cards):
+        entry = cards[key]
+        if "|" in key or not isinstance(entry, dict) or not entry.get("scope"):
+            continue
+        cards[card_key(key, entry["scope"])] = entry
+        del cards[key]
+        changed = True
+    if changed:
+        core.save_cards(cards)
+
+
+def card_key(channel_id: int, scope: str) -> str:
+    """A channel can hold one card per project calendar."""
+    return f"{channel_id}|{scope}"
+
+
+def projects(guild_id: int) -> list[dict]:
+    """PMbot's projects, read locally so the calendar works without the cog."""
+    try:
+        import pmbot
+    except ImportError:  # pragma: no cover  (the cog ships with the bot)
+        return []
+    return pmbot.server(guild_id).get("projects", [])
+
+
+def split_project(text: str, guild_id: int) -> tuple[dict | None, str]:
+    """`Halo fredag` -> (project Halo, "fredag"). Longest name wins."""
+    words = text.split()
+    for size in range(len(words), 0, -1):
+        head = " ".join(words[:size])
+        for project in projects(guild_id):
+            if project["name"].lower() == head.lower() or project["name"].lower().startswith(head.lower()):
+                return project, " ".join(words[size:])
+    return None, text
+
+
+def resolve(text: str, guild, user_id: int) -> tuple[str | None, dict | None, str]:
+    """The calendar this message is about: a project's, or a DM user's.
+
+    `Halo` may be named first (`!cal Halo`, `!cal Halo fri`, `!cal Halo add …`); a
+    server with one project does not need it. Returns (scope, project, rest).
+    """
+    if guild is None:
+        return core.scope_for(None, None, user_id), None, text
+
+    found = projects(guild.id)
+    if not found:
+        return None, None, text
+
+    project, rest = split_project(text, guild.id)
+    if project is None:
+        if len(found) > 1:
+            return None, None, text  # the caller asks which project
+        project, rest = found[0], text
+
+    scope = core.scope_for(guild.id, project["id"], user_id)
+    if len(found) == 1 and core._path(core.legacy_scope(guild.id)).exists():
+        # the shared calendar from before projects had their own
+        core.adopt_legacy(guild.id, project["id"])
+    return scope, project, rest
 
 
 def tasks_for_scope(scope: str) -> list[dict]:
     """Open tasks with due dates: a read-only overlay from PMbot's store."""
-    if not scope.startswith("guild_"):
+    guild_id = core.scope_guild(scope)
+    if guild_id is None:
         return []
-    try:
-        guild_id = int(scope.split("_", 1)[1])
-    except (IndexError, ValueError):
-        return []
-    import pmbot  # local, so the calendar still works without PMbot
-
-    data = pmbot.server(guild_id)
+    project_id = core.scope_project(scope)
     found = []
-    for task in data.get("tasks", []):
+    for task in _all_tasks(guild_id):
         if task.get("state") == "done" or not task.get("due"):
+            continue
+        if project_id is not None and task.get("project") != project_id:
             continue
         found.append({
             "date": task["due"],
@@ -55,6 +112,24 @@ def tasks_for_scope(scope: str) -> list[dict]:
         })
     found.sort(key=lambda task: (task["date"], task["title"].lower()))
     return found
+
+
+def _all_tasks(guild_id: int) -> list[dict]:
+    try:
+        import pmbot
+    except ImportError:  # pragma: no cover
+        return []
+    return pmbot.server(guild_id).get("tasks", [])
+
+
+def project_name(scope: str) -> str:
+    guild_id, project_id = core.scope_guild(scope), core.scope_project(scope)
+    if guild_id is None or project_id is None:
+        return ""
+    for project in projects(guild_id):
+        if project["id"] == project_id:
+            return project["name"]
+    return ""
 
 
 # ------------------------------------------------------------------- ui views
@@ -111,7 +186,7 @@ class CardNavView(discord.ui.View):
         if not found:
             await interaction.response.send_message("This card is out of date, run `!cal` again.", ephemeral=True)
             return
-        channel_id, entry = found
+        key, entry = found
         if delta == 0:
             now = core.now_local(entry["scope"])
             year, month = now.year, now.month
@@ -122,7 +197,7 @@ class CardNavView(discord.ui.View):
         try:
             file = await self.cog.render_file(entry["scope"], year, month)
             await interaction.message.edit(attachments=[file], view=self)
-            self.cog.save_entry(channel_id, year=year, month=month)
+            self.cog.save_entry(key, year=year, month=month)
         except Exception as exc:  # noqa: BLE001
             log.exception("card navigation failed")
             await interaction.followup.send(f"Could not render the calendar: {exc}", ephemeral=True)
@@ -150,6 +225,7 @@ class Calendar(commands.Cog):
         self.nav_view = CardNavView(self)
 
     async def cog_load(self) -> None:
+        migrate_cards()
         self.bot.add_view(self.nav_view)
         self.reminder_loop.start()
 
@@ -164,17 +240,17 @@ class Calendar(commands.Cog):
         return discord.File(str(path), filename=CARD_FILE_NAME)
     # --------------------------------------------------------------- cards
     def entry_for_message(self, message_id: int):
-        for channel_id, entry in core.load_cards().items():
+        for key, entry in core.load_cards().items():
             try:
                 if int(entry.get("message_id") or 0) == message_id:
-                    return channel_id, entry
+                    return key, entry
             except (TypeError, ValueError):
                 continue
         return None
 
-    def save_entry(self, channel_id, **fields) -> None:
+    def save_entry(self, key, **fields) -> None:
         cards = core.load_cards()
-        entry = cards.get(str(channel_id))
+        entry = cards.get(key)
         if entry is None:
             return
         entry.update(fields)
@@ -193,7 +269,7 @@ class Calendar(commands.Cog):
         file = await self.render_file(scope, year, month)
 
         cards = core.load_cards()
-        entry = cards.get(str(channel.id))
+        entry = cards.get(card_key(channel.id, scope))
         message: discord.Message | None = None
         if entry:
             try:
@@ -210,7 +286,7 @@ class Calendar(commands.Cog):
         else:
             message = await channel.send(file=file, view=self.nav_view)
 
-        cards[str(channel.id)] = {
+        cards[card_key(channel.id, scope)] = {
             "scope": scope,
             "message_id": message.id,
             "year": year,
@@ -221,18 +297,33 @@ class Calendar(commands.Cog):
 
     async def refresh_card(self, channel: discord.abc.Messageable, scope: str) -> None:
         cards = core.load_cards()
-        entry = cards.get(str(channel.id))
+        entry = cards.get(card_key(channel.id, scope))
         if not entry:
             if getattr(channel, "name", "") == "calendar":
                 await self.show_card(channel, scope)
             return
         await self.show_card(channel, scope, int(entry["year"]), int(entry["month"]))
     # ------------------------------------------------------------ commands
-    @commands.command(name="cal", usage="[day | add … | rm …]")
+    @commands.command(name="cal", usage="[project] [day | add … | rm …]")
     async def cal(self, ctx: commands.Context, *, args: str = ""):
         """Calendar: month card, day list, or add/remove an event."""
-        scope = scope_for(ctx)
-        text = (args or "").strip()
+        scope, project, text = resolve((args or "").strip(), ctx.guild, ctx.author.id)
+        if scope is None:
+            await ctx.reply(
+                "No project yet, so no calendar. `!newproject <name>` starts one (admin).",
+                mention_author=False,
+            )
+            return
+        if project is None:
+            names = " · ".join(f"**{p['name']}**" for p in projects(ctx.guild.id))
+            await ctx.reply(
+                f"Which project's calendar? {names}\n"
+                f"`!cal {projects(ctx.guild.id)[0]['name']}` · or name it first: "
+                f"`!cal {projects(ctx.guild.id)[0]['name']} add Lunch fri 12:30`",
+                mention_author=False,
+            )
+            return
+        text = (text or "").strip()
 
         if not text:
             try:
@@ -243,6 +334,14 @@ class Calendar(commands.Cog):
             return
 
         lowered = text.lower()
+        if lowered in {"adopt", "claim"}:
+            moved = core.adopt_legacy(ctx.guild.id, project["id"])
+            await ctx.reply(
+                f"Moved {moved} event{'s' if moved != 1 else ''} into **{project['name']}**."
+                if moved else f"There is no older shared calendar left to move into **{project['name']}**.",
+                mention_author=False,
+            )
+            return
         if lowered.startswith("add "):
             await self.add_command(ctx, scope, text[4:].strip())
             return
@@ -261,8 +360,9 @@ class Calendar(commands.Cog):
                 return
 
         await ctx.reply(
-            "`!cal` month · `!cal fri` one day · "
-            "`!cal add <what> <when> [hh:mm] [@ place]` · `!cal rm <when> <what>`",
+            f"`!cal {project['name']}` month · `!cal {project['name']} fri` one day · "
+            f"`!cal {project['name']} add <what> <when> [hh:mm] [@ place]` · "
+            f"`!cal {project['name']} rm <when> <what>`",
             mention_author=False,
         )
 
@@ -351,8 +451,9 @@ class Calendar(commands.Cog):
     @staticmethod
     def reminder_text(event: dict, scope: str | None = None) -> str:
         place = f" · {event['place']}" if event.get("place") else ""
+        room = f" · {name}" if (name := project_name(scope or "")) else ""
         if not event.get("time"):
-            return f"**Today · {event['title']}**\nAll day{place}"
+            return f"**Today · {event['title']}**{room}\nAll day{place}"
         start = datetime.fromisoformat(f"{event['date']}T{event['time']}")
         minutes = max(0, round((start - core.now_local(scope)).total_seconds() / 60))
         head = f"In {minutes} min" if minutes > 1 else "Now"
@@ -360,4 +461,4 @@ class Calendar(commands.Cog):
         if event.get("duration"):
             total = (int(event["time"][:2]) * 60 + int(event["time"][3:]) + int(event["duration"])) % (24 * 60)
             span = f"{span}–{total // 60:02d}:{total % 60:02d}"
-        return f"**{head} · {event['title']}**\n{span}{place}"
+        return f"**{head} · {event['title']}**{room}\n{span}{place}"

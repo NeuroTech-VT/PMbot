@@ -35,9 +35,57 @@ class CalendarError(ValueError):
 
 
 # --------------------------------------------------------------------- storage
-def scope_for(guild_id: int | None, user_id: int) -> str:
-    """One shared calendar per server, one private calendar per DM user."""
-    return f"guild_{guild_id}" if guild_id else f"dm_{user_id}"
+def scope_for(guild_id: int | None, project_id: int | None, user_id: int) -> str:
+    """One calendar per project, one private calendar per DM user.
+
+    `guild_<id>_p<id>` is a project calendar; `guild_<id>` is the shared calendar
+    projects had before they each got one, kept only so it can be migrated.
+    """
+    if guild_id is None:
+        return f"dm_{user_id}"
+    return legacy_scope(guild_id) if project_id is None else f"guild_{guild_id}_p{project_id}"
+
+
+def legacy_scope(guild_id: int) -> str:
+    return f"guild_{guild_id}"
+
+
+def scope_guild(scope: str) -> int | None:
+    """`guild_42_p7` and `guild_42` -> 42. `dm_9` -> None."""
+    head = scope.split("_", 1)
+    if len(head) != 2 or head[0] != "guild":
+        return None
+    number = head[1].split("_p", 1)[0]
+    return int(number) if number.isdigit() else None
+
+
+def scope_project(scope: str) -> int | None:
+    """`guild_42_p7` -> 7, anything else -> None."""
+    tail = scope.rsplit("_p", 1)
+    if len(tail) != 2 or not tail[1].isdigit() or scope_guild(scope) is None:
+        return None
+    return int(tail[1])
+
+
+def adopt_legacy(guild_id: int, project_id: int) -> int:
+    """Move the old shared calendar into a project's calendar. Returns events moved."""
+    old = legacy_scope(guild_id)
+    if not _path(old).exists():
+        return 0
+    source = _load(old)
+    if not source["events"]:
+        _path(old).unlink(missing_ok=True)
+        return 0
+    target = _load(scope_for(guild_id, project_id, 0))
+    next_id = max((event["id"] for event in target["events"]), default=0) + 1
+    for event in source["events"]:
+        event["id"] = next_id
+        next_id += 1
+        target["events"].append(event)
+    target["next_id"] = next_id
+    _save(scope_for(guild_id, project_id, 0), target)
+    _path(old).unlink(missing_ok=True)
+    return len(source["events"])
 
 
 def _path(scope: str) -> Path:
@@ -103,7 +151,8 @@ def _server_tz(guild_id: str) -> str:
 
 
 def zone_for(scope: str | None) -> ZoneInfo:
-    name = _server_tz(scope.split("_", 1)[1]) if (scope or "").startswith("guild_") else (os.getenv("PMBOT_TZ") or "UTC")
+    guild_id = scope_guild(scope or "")
+    name = _server_tz(str(guild_id)) if guild_id is not None else (os.getenv("PMBOT_TZ") or "UTC")
     try:
         return ZoneInfo(name)
     except Exception:  # noqa: BLE001  (bad hand edit, unknown tz)
@@ -135,7 +184,6 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
 
 
 _ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
-_DMY = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2}|\d{4}))?\b")
 _DAY_MONTH = re.compile(
     r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b",
     re.I,
@@ -144,7 +192,9 @@ _MONTH_DAY = re.compile(
     r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?\b",
     re.I,
 )
-_REL = re.compile(r"\b(?:\+|in\s+)?(\d{1,2})\s*([dw])\b", re.I)
+# The "+"/"in" is not optional: a bare "3d" or "3D" is a measurement or a printer,
+# not a date. Same for slash dates — "1/2 plywood" is a thickness.
+_REL = re.compile(r"(?:\+|\bin\s+)(\d{1,2})\s*(d(?:ays?)?|w(?:eeks?|ks)?)\b", re.I)
 _WEEKDAY = re.compile(r"\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:day|sday|nesday|rsday|urday)?\b", re.I)
 _WORD = re.compile(r"\b(today|tomorrow)\b", re.I)
 
@@ -170,23 +220,11 @@ def find_date(text: str, today: date | None = None) -> tuple[date, tuple[int, in
             if found:
                 return found, match.span()
 
-    match = _DMY.search(text)
-    if match:
-        month, day = int(match[1]), int(match[2])
-        year = int(match[3]) if match[3] else today.year
-        if year < 100:
-            year += 2000
-        found = _safe_date(year, month, day)
-        if found and not match[3] and found < today - timedelta(days=180):
-            found = _safe_date(year + 1, month, day)
-        if found:
-            return found, match.span()
-
     match = _REL.search(text)
     if match:
         amount = int(match[1])
-        unit = match[2].lower()
-        return add_days(today, amount * (7 if unit == "w" else 1)), match.span()
+        weeks = match[2].lower().startswith("w")
+        return add_days(today, amount * (7 if weeks else 1)), match.span()
 
     match = _WEEKDAY.search(text)
     if match:
