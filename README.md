@@ -8,19 +8,21 @@ Simple project management tools in Discord
 - Daily check-in & reminders (before deadline and after deadline if late)
 - End of week note every Sunday evening
 
-## Status
+## Status: AISLOP, REWRITE PENDING
 
 Implemented in this repo as one bot process. `bot.py` loads two cogs:
 
 - `pmbot.py`: one list per project, `!todo`, `!add`, `!tasks`, `!edit`, `!del`, `!newproject`, `!delproject`, `!settings`, the four buttons, the daily check-in, two reminders per task and the Sunday note. JSON store in `data/servers/`, nightly backup in `data/backups/`.
+
 - `calendar_bot.py` + `calendar_core.py` + `calendar_card.py/html`: a month card per project, typed `!cal` commands, one day as text and event reminders in a DM. No hour-by-hour view and no free text: calendar changes are typed.
+
 - `test_pmbot.py`, `test_calendar.py`, `test_help.py`: the pure parts, the ticker (with stub guilds), and the user docs.
 
 `!help` in Discord is the manual: an overview plus `!help tasks`, `!help projects`, `!help taps`, `!help calendar`, `!help settings`. The text lives in `help_text.py`, and `test_help.py` fails if a command has no page mentioning it or a page outgrows one message — so the help cannot drift.
 
 No Pi, no LLM, no database. This repo is separate from the Discord bridge, which keeps its own personal PMbot and a fuller calendar.
 
-## Running
+## Running: AISLOP, REWRITE PENDING
 
 ```
 python3 -m venv .venv
@@ -53,7 +55,7 @@ Tests:
 .venv/bin/python -m unittest test_pmbot test_calendar test_help -v
 ```
 
-## How it is put together
+## How it is put together: AISLOP, REWRITE PENDING
 
 One process, no services. `data/servers/<guild_id>.json` per server, four keys: `meta` (timezone, home channel, check-in and note times, who may start projects), `projects`, `tasks`, `runs` (last check-in per person, last note, last backup). Tasks are a flat list — a task carries a `project` id, so it never nests and moving one is a field change. Dates are `YYYY-MM-DD` in the server's timezone; button ids read `task:7:done`, so they survive a restart with no lookup table.
 
@@ -63,7 +65,7 @@ Scheduling is one `discord.ext.tasks` loop every 30 seconds asking four question
 
 Writes go through a temporary file, fsync and `os.replace`, with the previous version kept as `.json.bak`, under one lock per server; a nightly copy of `data/servers/` lands in `data/backups/` and the newest 14 are kept. A corrupt file falls back to its `.bak`, and with the bot stopped the JSON can be edited by hand.
 
-## Decisions worth remembering
+## Decisions worth remembering: AISLOP, REWRITE PENDING
 
 - **The todo list is the product.** One message per project per channel, summoned with `!todo` and edited in place forever — asking twice refines the same message. Nothing is pinned. Rows past the fifth have no buttons (Discord allows five action rows), so the message says so and `!tasks` carries the ids the check-in cannot reach.
 - **Four taps, never a typed status.** Done, On it, Blocked, Not started. Owners move their own rows; an admin can move anyone's, and a row whose owner is a bare name is open to the channel.
@@ -76,3 +78,7 @@ Writes go through a temporary file, fsync and `os.replace`, with the previous ve
 - **A project has no channel.** It is a name and a set of tasks, server-wide. The list shows up wherever you ask for it and is kept up to date in each channel separately.
 - **Deleting is a button, not a typed word.** `!delproject <name>` prints the project, its counts and how many list messages it will remove, then waits for a press; only the admin who ran it can confirm, and its tasks go with it.
 
+## Further Applications
+
+- Could use the same tool for personal things too
+- Project management is useful for AI agent orchestration
