@@ -9,7 +9,7 @@ OVERVIEW = """**PMbot**: per-project todo list & calendar
 **Most-used features:**
 * `!todo` shows todo list for a current project
 * `!todo list` shows todo list for all projects
-* `!add <todo_text> @<person_assigned> <day_of_the_week>`
+* `!add <project>: <todo_text> @<person_assigned> <date>`
 * `!cal` month-view of the calendar
 * `!cal <day_of_the_week>` shows one day
 
