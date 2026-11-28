@@ -14,7 +14,12 @@ Implemented in this repo as one bot process. `bot.py` loads two cogs:
 - `calendar_bot.py` + `calendar_core.py` + `calendar_card.py/html`: the month card, typed
   `!cal` commands, one day as text and event reminders in a DM. No hour-by-hour view and no free text:
   calendar changes are typed.
-- `test_pmbot.py`, `test_calendar.py`: the pure parts.
+- `test_pmbot.py`, `test_calendar.py`, `test_help.py`: the pure parts, the ticker (with stub
+  guilds), and the user docs.
+
+`!help` in Discord is the manual: an overview plus `!help tasks`, `!help projects`, `!help taps`,
+`!help calendar`, `!help settings`. The text lives in `help_text.py`, and `test_help.py` fails if a
+command has no page mentioning it or a page outgrows one message — so the help cannot drift.
 
 No Pi, no LLM, no database. This repo is separate from the Discord bridge, which keeps its own
 personal PMbot and a fuller calendar.
@@ -50,7 +55,7 @@ WantedBy=default.target
 Tests:
 
 ```
-.venv/bin/python -m unittest test_pmbot test_calendar -v
+.venv/bin/python -m unittest test_pmbot test_calendar test_help -v
 ```
 
 ## How it is put together
@@ -89,6 +94,8 @@ with the bot stopped the JSON can be edited by hand.
   rows; an admin can move anyone's, and a row whose owner is a bare name is open to the channel.
 - **Corrections are typed, one task at a time.** `!tasks` prints every open task with its id,
   `!edit 7 <words> @who <date>` changes only what you give it, `!del 7` removes it.
+- **Help is part of the product.** `!help` is written for the person who has never used a bot
+  command, in the same words the bot uses: no "invoke the command", no config table. It is tested.
 - **Two reminders, ever**: one before the deadline, one when it first slips. After that a task waits
   for the note.
 - **No AI.** Tasks and calendar changes are typed; there is no model call anywhere.

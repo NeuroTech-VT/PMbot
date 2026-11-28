@@ -11,6 +11,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+import help_text
 from calendar_bot import Calendar
 from pmbot import PMBot
 
@@ -26,22 +27,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("pmbot")
-
-HELP = """**PMbot** · one list per project, one check-in a day, two reminders a task.
-Owners move their own rows; an admin can move any.
-
-**Projects**
-• `!todo [project]` the list, late first, four taps per row
-• `!add [project:] <task> @who <date>` one task, one owner, one date · `!add Print the jig @sam fri`
-• `!tasks [project]` the ids · `!edit 7 new words @sam fri` fix one · `!del 7` remove it
-• `!newproject <name>` start a project (admin) · `!delproject <name>` delete one (admin)
-• `!settings [channel|checkin|note|tz|staff]` where it talks, times, timezone (admin)
-
-**Calendar**
-• `!cal` the month card, with ◀ Today ▶
-• `!cal fri` one day · `!cal tomorrow` · `!cal 3 dec`
-• `!cal add <what> <when>` an event with optional time and place
-• `!cal rm <when> <what>` cancel an event"""
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -60,9 +45,15 @@ class Client(commands.Bot):
 bot = Client(command_prefix="!", intents=intents, help_command=None)
 
 
-@bot.command(name="help")
-async def help_command(ctx: commands.Context):
-    await ctx.reply(HELP, mention_author=False)
+@bot.command(name="help", aliases=["h", "commands"])
+async def help_command(ctx: commands.Context, *, topic: str | None = None):
+    """`!help` for the overview, `!help tasks` (and friends) for the detail."""
+    page = help_text.page_for(topic)
+    if page is None:
+        topics = " · ".join(f"`!help {name}`" for name in help_text.PAGES)
+        await ctx.reply(f"No page for `{topic}`.\n{topics}", mention_author=False)
+        return
+    await ctx.reply(page, mention_author=False)
 
 
 token = os.getenv("DISCORD_TOKEN")
